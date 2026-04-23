@@ -11,7 +11,10 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # PostgreSQL Configuration
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
+# Database Configuration
+# Ensure absolute path for database
+basedir = os.path.abspath(os.path.dirname(__file__))
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///' + os.path.join(basedir, 'bus_tracking.db'))
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
@@ -88,6 +91,7 @@ class Bus(db.Model):
     speed = db.Column(db.String(20))
     lat = db.Column(db.Float, default=12.9716) 
     lng = db.Column(db.Float, default=77.5946)
+    driver_name = db.Column(db.String(100))
     
     stops = db.relationship('Stop', backref='bus', lazy=True, cascade="all, delete-orphan")
 
@@ -151,6 +155,13 @@ def login():
     if user:
         if not user.approved and user.role != 'admin':
             return jsonify({"success": False, "message": "Account pending admin approval"}), 403
+            
+        # ✅ ENFORCE BUS-SPECIFIC DRIVER LOGIN
+        if role == 'driver':
+            requested_bus = data.get('bus_id')
+            if not requested_bus or str(user.driver_info.assigned_bus) != str(requested_bus):
+                return jsonify({"success": False, "message": f"Unauthorized: You are not assigned to Bus {requested_bus}"}), 403
+                
         return jsonify({"success": True, "user": user.to_dict()})
     return jsonify({"success": False, "message": "Invalid credentials"}), 401
 
@@ -210,25 +221,65 @@ def approve_user(user_id):
         return jsonify({"success": True, "message": f"User {user.username} approved"})
     return jsonify({"success": False, "message": "User not found"}), 404
 
+@app.route('/api/admin/delete_user/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    user = User.query.get(user_id)
+    if user:
+        db.session.delete(user)
+        db.session.commit()
+        return jsonify({"success": True, "message": f"User {user.username} deleted"})
+    return jsonify({"success": False, "message": "User not found"}), 404
+
 @app.route('/api/admin/add_bus', methods=['POST'])
 def add_bus():
     data = request.json
     try:
-        new_bus = Bus(
-            id=data.get('id'),
-            name=data.get('name', "Bus " + str(data.get('id'))),
-            route_name=data.get('route_name'),
-            lat=data.get('lat', 12.9716),
-            lng=data.get('lng', 77.5946)
-        )
+        bus_id = data.get('id')
+        driver_name = data.get('driver_name')
+        
+        # 1. Create or Update Bus
+        bus = Bus.query.get(bus_id)
+        if not bus:
+            bus = Bus(id=bus_id)
+        
+        bus.name = data.get('name', f"Bus {bus_id}")
+        bus.route_name = data.get('route_name')
+        bus.driver_name = driver_name
+        
+        # 2. Update Stops
+        Stop.query.filter_by(bus_id=bus_id).delete()
         stops_list = data.get('stops', [])
         for stop_name in stops_list:
             if stop_name.strip():
-                new_stop = Stop(name=stop_name, bus=new_bus)
+                new_stop = Stop(name=stop_name, bus=bus)
                 db.session.add(new_stop)
-        db.session.add(new_bus)
+        
+        # 3. Create or Update Driver User
+        if driver_name:
+            # Check if this name is already taken by a non-driver
+            existing_user = User.query.filter_by(username=driver_name).first()
+            if existing_user and existing_user.role != 'driver':
+                return jsonify({"success": False, "message": "Driver name conflicts with existing non-driver account"}), 400
+                
+            driver_user = existing_user
+            if not driver_user:
+                driver_user = User(username=driver_name, role='driver', approved=True)
+                db.session.add(driver_user)
+                db.session.flush()
+            
+            driver_user.password = f"bus{bus_id}driver" # Automated password
+            
+            # Update Driver Profile
+            profile = driver_user.driver_info
+            if not profile:
+                profile = DriverProfile(user_id=driver_user.id, full_name=driver_name)
+                db.session.add(profile)
+                db.session.flush() # Ensure ID is assigned
+            profile.assigned_bus = bus_id
+
+        db.session.add(bus)
         db.session.commit()
-        return jsonify({"success": True, "message": "Bus and stops added"})
+        return jsonify({"success": True, "message": f"Bus {bus_id} and Driver {driver_name} updated"})
     except Exception as e:
         db.session.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
@@ -255,6 +306,14 @@ def get_bus(bus_id):
     if bus:
         return jsonify(bus.to_dict())
     return jsonify({"message": "Bus not found"}), 404
+
+@app.route('/api/bus/<bus_id>/students', methods=['GET'])
+def get_bus_students(bus_id):
+    try:
+        students = StudentProfile.query.filter_by(assigned_bus=str(bus_id)).all()
+        return jsonify([{"full_name": s.full_name, "assigned_stop": s.assigned_stop} for s in students])
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
 
 if __name__ == '__main__':
     with app.app_context():
