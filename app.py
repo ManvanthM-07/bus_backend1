@@ -45,7 +45,8 @@ class User(db.Model):
             data.update({
                 "full_name": self.student_info.full_name,
                 "assigned_bus": self.student_info.assigned_bus,
-                "assigned_stop": self.student_info.assigned_stop
+                "assigned_stop": self.student_info.assigned_stop,
+                "parent_name": self.student_info.parent_name
             })
         elif self.role == 'parent' and self.parent_info:
             data.update({
@@ -66,6 +67,7 @@ class StudentProfile(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     full_name = db.Column(db.String(100))
+    parent_name = db.Column(db.String(100))
     assigned_bus = db.Column(db.String(10))
     assigned_stop = db.Column(db.String(100))
 
@@ -187,7 +189,13 @@ def signup():
         db.session.flush()
 
         if role == 'student':
-            profile = StudentProfile(user_id=new_user.id, full_name=full_nm, assigned_bus=data.get('assigned_bus'), assigned_stop=data.get('assigned_stop'))
+            profile = StudentProfile(
+                user_id=new_user.id, 
+                full_name=full_nm, 
+                parent_name=data.get('parent_name'),
+                assigned_bus=data.get('assigned_bus'), 
+                assigned_stop=data.get('assigned_stop')
+            )
             db.session.add(profile)
         elif role == 'parent':
             profile = ParentProfile(user_id=new_user.id, full_name=full_nm, student_name=data.get('student_name'))
